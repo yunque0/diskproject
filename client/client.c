@@ -1,0 +1,216 @@
+#include "func.h"
+#include "md5.h"
+int getcommand(char *buf,char *username)
+{
+	bzero(username,sizeof(username));
+	int i=0,j=0;
+	while(buf[i]==' ')
+	{
+		i++;
+	}
+	for(;buf[i]!=' '&&buf[i]!='\0' ;i++)
+	{
+		username[j++]=buf[i];
+	}
+	return 0;
+}
+
+int getfilename(char *buf,char *filename)
+{
+	char temp[100];
+	strcpy(temp,buf);
+	char *token;
+	token=strtok(temp," ");
+	token=strtok(NULL," ");
+	strcpy(filename,token);
+	return 0;
+}
+
+typedef struct 
+{
+	int msgtype;
+	int msglen;
+	char msg[1024];
+}train;
+int main(int argc,char* argv[])
+{
+	int fd,putsflag,getsflag,regiflag,flag=1;
+	int readynum;
+	int efd,sfd,ret;
+	char command[100];
+	char *saltpass;
+	struct stat tempstat;
+	int tempfd;
+	/*if(argc!=2)
+	  {
+	  printf("error args\n");
+	  return -1;
+	  }*/
+	train msgtrain;
+	bzero(&msgtrain,sizeof(msgtrain));
+	char username[25]={0};
+	char password[25]={0};
+	char msg[50]={0};
+	char filename[100];
+	char salt[50];
+	int signined=0;//是否成功登录
+	sfd=socket(AF_INET,SOCK_STREAM,0);
+	error_check(-1,sfd,"socket");
+	struct sockaddr_in saddr;
+	saddr.sin_port=htons(2001);
+	saddr.sin_family=AF_INET;
+	saddr.sin_addr.s_addr=inet_addr("192.168.5.111");
+	ret=connect(sfd,(struct sockaddr*)&saddr,sizeof(struct sockaddr));
+	error_check(-1,ret,"connect");
+	printf("input your username:\n");
+	while(0==signined)
+	{
+		bzero(msg,sizeof(msg));
+		scanf("%s",username);
+		printf("input your password:\n");
+		scanf("%s",password);
+	//	strcat(msg,username);
+	//	strcat(msg," ");
+	//	strcat(msg,password);
+		bzero(&msgtrain,sizeof(msgtrain));
+		msgtrain.msgtype=1;
+		strcpy(msgtrain.msg,username);
+		msgtrain.msglen=strlen(msgtrain.msg);
+		send(sfd,&msgtrain,msgtrain.msglen+8,0);
+	//	printf("info=%s\n",msgtrain.msg);
+		bzero(salt,sizeof(salt));//清空salt数组用来接受盐值
+		recv(sfd,salt,sizeof(salt),0);
+	//	printf("recv=%s\n",salt);
+		saltpass=crypt(password,salt);
+	//	printf("crypt:%s\n",saltpass);
+		bzero(msgtrain.msg,sizeof(msgtrain.msg));
+		msgtrain.msgtype=2;
+		strcpy(msgtrain.msg,saltpass);
+		msgtrain.msglen=strlen(msgtrain.msg);
+		send(sfd,&msgtrain,msgtrain.msglen+8,0);
+		recv(sfd,&(msgtrain.msgtype),4,0);
+		if(2==msgtrain.msgtype)
+		{
+			signined=1;
+			printf("signin ok\n");
+		}
+		else
+		{
+			printf("error username or password\n");
+			printf("input your username\n");
+		}			
+	}
+	efd=epoll_create(1);
+	struct epoll_event event,evs[2];
+	event.events=EPOLLIN;
+	event.data.fd=sfd;
+	epoll_ctl(efd,EPOLL_CTL_ADD,sfd,&event);
+	event.data.fd=STDIN_FILENO;
+	epoll_ctl(efd,EPOLL_CTL_ADD,STDIN_FILENO,&event);
+	int i;
+	char sendbuf[100]={0};
+	char recvbuf[100]={0};
+	char md5sum[33];
+	while(1)
+	{
+		readynum=epoll_wait(efd,evs,2,-1);
+		for(i=0;i<readynum;i++)
+		{
+			if(sfd==evs[i].data.fd)
+			{
+				bzero(recvbuf,sizeof(recvbuf));
+				ret=recv(sfd,recvbuf,sizeof(recvbuf),0);
+				if(ret==0)
+				{
+					break;
+				}
+				printf("%s\n",recvbuf);
+			}
+			if(0==evs[i].data.fd)
+			{	
+				//printf("监听\n");
+				bzero(msgtrain.msg,sizeof(msgtrain.msg));
+				read(0,msgtrain.msg,sizeof(msgtrain.msg));
+				getcommand(msgtrain.msg,command);
+				if(strcmp(command,"puts")==0)
+				{
+					bzero(filename,sizeof(filename));
+					getfilename(msgtrain.msg,filename);
+					filename[strlen(filename)-1]='\0';
+					printf("filename=%s\n",filename);
+					fd=open(filename,O_RDONLY);
+					if(-1==fd)//文件没打开
+					{
+						perror("puts:open");
+						printf("no file exit\n");
+						break;
+					}
+					else
+					{
+						bzero(md5sum,32);
+						Compute_file_md5(filename,md5sum);
+						printf("md5sum=%s\n",md5sum);
+						msgtrain.msgtype=1;
+						msgtrain.msg[strlen(msgtrain.msg)-1]=' ';
+						strcat(msgtrain.msg,md5sum);
+						msgtrain.msglen=strlen(msgtrain.msg);
+						send(sfd,&msgtrain,msgtrain.msglen+8,0);
+						recv(sfd,&putsflag,4,0);
+						if(1==putsflag)
+						{
+							printf("start puts file\n");
+							send_file(sfd,filename);
+							printf("puts success\n");
+						}
+						else if(0==putsflag)
+						{
+							printf("file has been exit\n");
+						}
+						else
+						{
+							printf("unknown error\n");
+						}
+					}			
+				}
+				else if(strcmp(command,"gets")==0)
+				{
+					bzero(filename,sizeof(filename));
+					getfilename(msgtrain.msg,filename);
+					filename[strlen(filename)-1]='\0';
+					//printf("filename=%s\n",filename);
+					struct stat tempstat;
+					int tempfd=open(filename,O_RDONLY|O_CREAT,0666);
+					bzero(&tempstat,sizeof(struct stat));
+					fstat(tempfd,&tempstat);
+					close(tempfd);
+					sprintf(msgtrain.msg,"%s %d",msgtrain.msg,(int)tempstat.st_size);
+					msgtrain.msgtype=1;
+					msgtrain.msglen=strlen(msgtrain.msg)-1;
+					send(sfd,&msgtrain,msgtrain.msglen+8,0);
+					recv(sfd,&getsflag,4,0);
+					if(getsflag==1)
+					{
+						printf("start recv_file do not send command until finished\n");
+						recv_file(sfd,filename);
+					}
+					else
+					{
+						printf("server refuse your request\n");
+					}
+				}
+				else
+				{
+		//			printf("before send\n");		
+					msgtrain.msgtype=1;
+					msgtrain.msglen=strlen(msgtrain.msg)-1;
+					ret=send(sfd,&msgtrain,msgtrain.msglen+8,0);
+					//			printf("1%s1\n",sendbuf);
+					error_check(-1,ret,"send");
+				}
+			}
+		}
+	}
+	//while(1);
+	close(sfd);
+	return 0;
+}
